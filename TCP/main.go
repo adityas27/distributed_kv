@@ -4,18 +4,20 @@ import (
 	"bufio"
 	"fmt"
 	"net"
-	"strings"
 	"sync"
+
+	"tcp_test/parser"
 )
 
-
 type Server struct {
-	mu      sync.Mutex   // to lock and unlock
-	counter int          // starting with something basic as counter will change it to byte in next stage of implementation
+	mu    sync.RWMutex
+	store map[string]string
 }
 
 func NewServer() *Server {
-	return &Server{}
+	return &Server{
+		store: make(map[string]string),
+	}
 }
 
 func (s *Server) Start(addr string) error {
@@ -29,11 +31,11 @@ func (s *Server) Start(addr string) error {
 
 	for {
 		conn, err := ln.Accept()
-		fmt.Println(conn)
 		if err != nil {
 			fmt.Println("accept error:", err)
 			continue
 		}
+
 		go s.handleConnection(conn)
 	}
 }
@@ -42,46 +44,57 @@ func (s *Server) handleConnection(conn net.Conn) {
 	defer conn.Close()
 
 	fmt.Println("Client connected:", conn.RemoteAddr())
+
 	scanner := bufio.NewScanner(conn)
 
 	for scanner.Scan() {
-		line := strings.TrimSpace(scanner.Text())
-		response := s.parseCommand(line)
+		line := scanner.Text()
 
-		_, err := fmt.Fprintln(conn, response)
+		cmd, err := parser.Parse(line)
+		if err != nil {
+			fmt.Fprintln(conn, "ERROR", err.Error())
+			continue
+		}
+
+		response := s.execute(cmd)
+
+		_, err = fmt.Fprintln(conn, response)
 		if err != nil {
 			return
 		}
-		if response == "BYE" {
-			return
-		}
-	}
-
-	if err := scanner.Err(); err != nil {
-		fmt.Println("read error:", err)
 	}
 }
 
-func (s *Server) parseCommand(line string) string {
-	fields := strings.Fields(line)
-
-	if len(fields) == 0 {
-		return "ERROR empty command"
-	}
-
-	cmd := strings.ToUpper(fields[0])
-	args := fields[1:]
-
-	switch cmd {
+func (s *Server) execute(cmd *parser.Command) string {
+	switch cmd.Name {
 
 	case "PING":
 		return "PONG"
 
-	case "ECHO":
-		return strings.Join(args, " ")
+	case "SET":
+		s.mu.Lock()
+		s.store[cmd.Key] = cmd.Value
+		s.mu.Unlock()
 
-	case "QUIT":
-		return "BYE"
+		return "OK"
+
+	case "GET":
+		s.mu.RLock()
+		value, ok := s.store[cmd.Key]
+		s.mu.RUnlock()
+
+		if !ok {
+			return "NULL"
+		}
+
+		return value
+
+	case "DELETE":
+		s.mu.Lock()
+		delete(s.store, cmd.Key)
+		s.mu.Unlock()
+
+		return "OK"
 
 	default:
 		return "ERROR unknown command"
@@ -94,4 +107,4 @@ func main() {
 	if err := server.Start(":9000"); err != nil {
 		panic(err)
 	}
-}	
+}
