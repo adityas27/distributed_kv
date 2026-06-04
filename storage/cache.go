@@ -1,26 +1,37 @@
 package storage
 
 import (
+	"container/list"
 	"sync"
 	"time"
 )
 
+const MemoryLimit = 1024*1024*512
+const KeysLimit = 100
+
 type Entry struct {
 	Value     string
 	ExpiresAt time.Time
+	Size      int
+	node      *list.Element
 }
 
 type Cache struct {
-	mu    sync.RWMutex
-	items map[string]Entry
+	mu            sync.RWMutex
+	items         map[string]*Entry
+	lru           *list.List
+	currentMemory int
 }
 
 func NewCache() *Cache {
 	c := &Cache{
-		items: make(map[string]Entry),
+		items:         make(map[string]*Entry),
+		lru:           list.New(),
+		currentMemory: 0,
 	}
 
 	go c.cleanupWorker()
+	go c.evictionWorker()
 
 	return c
 }
@@ -29,15 +40,28 @@ func (c *Cache) Set(key, value string, ttl int) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 
-	entry := Entry{
+
+	if existing, ok := c.items[key]; ok {
+		c.currentMemory -= existing.Size
+		c.lru.Remove(existing.node)
+		delete(c.items, key)
+	}
+
+	entry := &Entry{
 		Value: value,
+		Size:  len(key) + len(value),
 	}
 
 	if ttl > 0 {
 		entry.ExpiresAt = time.Now().Add(time.Duration(ttl) * time.Second)
 	}
 
+	// adds new item to top of the list : most recently used
+	entry.node = c.lru.PushFront(key)
 	c.items[key] = entry
+	c.currentMemory += entry.Size
+
+	c.evictIfNeeded() // evict as needed
 }
 
 func (c *Cache) Get(key string) (string, bool) {
@@ -53,10 +77,17 @@ func (c *Cache) Get(key string) (string, bool) {
 		time.Now().After(entry.ExpiresAt) {
 
 		c.mu.Lock()
+		c.currentMemory -= entry.Size
+		c.lru.Remove(entry.node)
 		delete(c.items, key)
 		c.mu.Unlock()
 		return "", false
 	}
+
+	//update LRU order on access
+	c.mu.Lock()
+	c.lru.MoveToFront(entry.node)
+	c.mu.Unlock()
 
 	return entry.Value, true
 }
@@ -64,7 +95,42 @@ func (c *Cache) Get(key string) (string, bool) {
 func (c *Cache) Delete(key string) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	delete(c.items, key)
+
+	if entry, ok := c.items[key]; ok {
+		c.currentMemory -= entry.Size
+		c.lru.Remove(entry.node)
+		delete(c.items, key)
+	}
+}
+
+// removes least recently used items when limits are exceeded
+func (c *Cache) evictIfNeeded() {
+	for {
+		if len(c.items) > KeysLimit || c.currentMemory > MemoryLimit {
+			if elem := c.lru.Back(); elem != nil {
+				key := elem.Value.(string)
+				entry := c.items[key]
+				c.currentMemory -= entry.Size
+				c.lru.Remove(elem)
+				delete(c.items, key)
+			} else {
+				break
+			}
+		} else {
+			break
+		}
+	}
+}
+
+// evictionWorker periodically checks and evicts if needed
+func (c *Cache) evictionWorker() {
+	ticker := time.NewTicker(10 * time.Second)
+
+	for range ticker.C {
+		c.mu.Lock()
+		c.evictIfNeeded()
+		c.mu.Unlock()
+	}
 }
 
 func (c *Cache) cleanupWorker() {
@@ -74,13 +140,34 @@ func (c *Cache) cleanupWorker() {
 		now := time.Now()
 		c.mu.Lock()
 
+		var keysToDelete []string
 		for key, entry := range c.items {
 			if !entry.ExpiresAt.IsZero() &&
 				now.After(entry.ExpiresAt) {
-				delete(c.items, key)
+				keysToDelete = append(keysToDelete, key)
 			}
 		}
 
+		for _, key := range keysToDelete {
+			entry := c.items[key]
+			c.currentMemory -= entry.Size
+			c.lru.Remove(entry.node)
+			delete(c.items, key)
+		}
+
 		c.mu.Unlock()
+	}
+}
+
+// statistic feature
+func (c *Cache) Stats() map[string]interface{} {
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+
+	return map[string]interface{}{
+		"items":         len(c.items),
+		"memory_used":   c.currentMemory,
+		"memory_limit":  MemoryLimit,
+		"keys_limit":    KeysLimit,
 	}
 }
