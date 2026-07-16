@@ -1,4 +1,4 @@
 *.exe
-TaskList.txt
+# TaskList.txt
 *.log
 test

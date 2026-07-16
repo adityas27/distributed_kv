@@ -1,0 +1,81 @@
+Phase 1 — Core KV Store
+In-Memory Key-Value Store
+SET
+GET
+DELETE
+Thread-Safe Access
+RWMutex
+Concurrent reads/writes
+TCP Server
+Accept client connections
+Parse commands
+Return responses
+Command Protocol
+SET key value
+GET key
+DELETE key
+PING
+
+Phase 2 — Cache Features
+TTL Support
+Key expiration
+Background cleanup worker
+LRU Eviction
+Memory limit
+Automatic eviction
+Statistics
+Total keys
+Cache hits
+Cache misses
+Evictions
+
+Phase 3 — Persistence
+Write Ahead Log (WAL)
+Log all writes
+Recovery From WAL
+Replay logs on startup
+Snapshots
+Periodic persistence
+Faster startup
+
+Phase 4 — Distributed Foundations
+Consistent Hash Ring
+Hash nodes
+Hash keys
+Key ownership
+Virtual Nodes
+Better load balancing
+Cluster Configuration
+Register nodes
+Maintain node list
+
+Phase 5 — Distributed Operations
+Request Routing
+Forward requests to correct node
+Multi-Node Cluster
+Run multiple cache servers
+Inter-Node Communication
+Node-to-node TCP communication
+
+Phase 6 — Reliability
+Replication
+Primary replica assignment
+Replica Synchronization
+Copy writes to replica
+Heartbeat System
+Node health checks
+Failure Detection
+Detect dead nodes
+Automatic Ring Update
+Remove failed nodes
+Key Rebalancing
+Redistribute ownership
+Phase 7 — Observability
+Metrics Endpoint
+Requests/sec
+Latency
+Memory usage
+Structured Logging
+Benchmark Tool
+Concurrent clients
+Throughput tests
