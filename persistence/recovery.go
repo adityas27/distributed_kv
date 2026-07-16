@@ -6,9 +6,6 @@ import (
 	"os"
 	"path/filepath"
 	"time"
-
-	"tcp_test/storage"
-	"tcp_test/wal"
 )
 
 type RecoveryManager struct {
@@ -30,7 +27,12 @@ type RecoveryStats struct {
 	RecoveryTime            time.Duration
 }
 
-func (rm *RecoveryManager) Recover(cache *storage.Cache) (*RecoveryStats, error) {
+type RecoveryCache interface {
+	RestoreEntry(key, value string, ttl int, expiresAt time.Time)
+	RestoreDelete(key string)
+}
+
+func (rm *RecoveryManager) Recover(cache RecoveryCache) (*RecoveryStats, error) {
 	start := time.Now()
 
 	stats := &RecoveryStats{}
@@ -88,7 +90,7 @@ type WALReplayStats struct {
 	ExpiredEntriesSkipped int
 }
 
-func (rm *RecoveryManager) replayWAL(cache *storage.Cache, snapshotTime time.Time) (*WALReplayStats, error) {
+func (rm *RecoveryManager) replayWAL(cache RecoveryCache, snapshotTime time.Time) (*WALReplayStats, error) {
 	stats := &WALReplayStats{}
 
 	file, err := os.Open(rm.walPath)
@@ -104,7 +106,7 @@ func (rm *RecoveryManager) replayWAL(cache *storage.Cache, snapshotTime time.Tim
 	now := time.Now()
 
 	for scanner.Scan() {
-		var entry wal.WALEntry
+		var entry WALEntry
 
 		if err := json.Unmarshal(scanner.Bytes(), &entry); err != nil {
 			continue
@@ -118,7 +120,7 @@ func (rm *RecoveryManager) replayWAL(cache *storage.Cache, snapshotTime time.Tim
 
 		switch entry.Op {
 
-		case wal.SET:
+		case SET:
 			expiresAt := time.Time{}
 
 			if entry.TTL > 0 {
@@ -145,7 +147,7 @@ func (rm *RecoveryManager) replayWAL(cache *storage.Cache, snapshotTime time.Tim
 
 			stats.EntriesReplayed++
 
-		case wal.DELETE:
+		case DELETE:
 			cache.RestoreDelete(entry.Key)
 			stats.EntriesReplayed++
 		}
@@ -158,7 +160,7 @@ func (rm *RecoveryManager) replayWAL(cache *storage.Cache, snapshotTime time.Tim
 	return stats, nil
 }
 
-func (rm *RecoveryManager) RotateWAL(w *wal.WAL) error {
+func (rm *RecoveryManager) RotateWAL(w *WAL) error {
 	if err := w.Close(); err != nil {
 		return err
 	}
@@ -166,6 +168,6 @@ func (rm *RecoveryManager) RotateWAL(w *wal.WAL) error {
 	return os.Remove(rm.walPath)
 }
 
-func (rm *RecoveryManager) CreateNewWALFile() (*wal.WAL, error) {
-	return wal.NewWAL(rm.walPath)
+func (rm *RecoveryManager) CreateNewWALFile() (*WAL, error) {
+	return NewWAL(rm.walPath)
 }

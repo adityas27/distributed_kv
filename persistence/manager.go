@@ -4,14 +4,16 @@ import (
 	"fmt"
 	"sync/atomic"
 	"time"
-
-	"tcp_test/storage"
-	"tcp_test/wal"
 )
 
+type ManagedCache interface {
+	SnapshotEntries() []SnapshotEntry
+	SetWAL(*WAL)
+}
+
 type SnapshotManager struct {
-	cache          *storage.Cache
-	walInstance    *wal.WAL
+	cache          ManagedCache
+	walInstance    *WAL
 	snapshotWriter *SnapshotWriter
 	interval       time.Duration
 	ticker         *time.Ticker
@@ -34,8 +36,8 @@ func DefaultSnapshotManagerConfig() SnapshotManagerConfig {
 }
 
 func NewSnapshotManager(
-	cache *storage.Cache,
-	walInstance *wal.WAL,
+	cache ManagedCache,
+	walInstance *WAL,
 	config SnapshotManagerConfig,
 ) *SnapshotManager {
 
@@ -75,7 +77,7 @@ func (sm *SnapshotManager) Start() error {
 					continue
 				}
 
-				newWAL, err := wal.NewWAL("wal.log")
+				newWAL, err := NewWAL("wal.log")
 				if err != nil {
 					continue
 				}
@@ -109,7 +111,7 @@ func (sm *SnapshotManager) CreateSnapshotNow() error {
 		return err
 	}
 
-	newWAL, err := wal.NewWAL("wal.log")
+	newWAL, err := NewWAL("wal.log")
 	if err != nil {
 		return err
 	}

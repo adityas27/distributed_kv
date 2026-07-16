@@ -5,7 +5,7 @@ import (
 	"sync"
 	"time"
 
-	"tcp_test/wal"
+	"tcp_test/persistence"
 )
 
 const MemoryLimit = 1024 * 1024 * 512
@@ -24,24 +24,21 @@ type Cache struct {
 	lru           *list.List
 	currentMemory int
 
-	wal *wal.WAL
+	wal *persistence.WAL
 }
-type SnapshotEntry struct {
-	Key       string
-	Value     string
-	ExpiresAt time.Time
+
+func (c *Cache) WAL() *persistence.WAL {
+	return c.wal
 }
-func (c *Cache) WAL() *wal.WAL {
-    return c.wal
-}
-func (c *Cache) SnapshotEntries() []SnapshotEntry {
+
+func (c *Cache) SnapshotEntries() []persistence.SnapshotEntry {
 	c.mu.RLock()
 	defer c.mu.RUnlock()
 
-	entries := make([]SnapshotEntry, 0, len(c.items))
+	entries := make([]persistence.SnapshotEntry, 0, len(c.items))
 
 	for key, entry := range c.items {
-		entries = append(entries, SnapshotEntry{
+		entries = append(entries, persistence.SnapshotEntry{
 			Key:       key,
 			Value:     entry.Value,
 			ExpiresAt: entry.ExpiresAt,
@@ -52,7 +49,7 @@ func (c *Cache) SnapshotEntries() []SnapshotEntry {
 }
 
 func NewCache() *Cache {
-	w, err := wal.NewWAL("wal.log")
+	w, err := persistence.NewWAL("wal.log")
 	if err != nil {
 		panic(err)
 	}
@@ -100,7 +97,6 @@ func (c *Cache) Set(key, value string, ttl int) error {
 	c.evictIfNeeded() // evict as needed
 	return nil
 }
-
 
 func (c *Cache) Get(key string) (string, bool) {
 	c.mu.RLock()
@@ -215,8 +211,6 @@ func (c *Cache) Stats() map[string]interface{} {
 	}
 }
 
-
-
 // RestoreEntry restores an entry to the cache without logging to WAL.
 // Used during recovery from snapshots or WAL replay.
 // Does not update LRU order to avoid interference with recovery.
@@ -261,7 +255,7 @@ func (c *Cache) RestoreDelete(key string) {
 }
 
 // SetWAL updates the WAL instance, used when rotating WAL files.
-func (c *Cache) SetWAL(newWAL *wal.WAL) {
+func (c *Cache) SetWAL(newWAL *persistence.WAL) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	c.wal = newWAL

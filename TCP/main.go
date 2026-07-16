@@ -5,19 +5,27 @@ import (
 	"fmt"
 	"log"
 	"net"
+	"os"
+	"path/filepath"
+	"strings"
+	"tcp_test/cluster"
 	"tcp_test/parser"
 	"tcp_test/persistence"
 	"tcp_test/storage"
 )
 
 type Server struct {
-	cache   *storage.Cache
-	manager *persistence.SnapshotManager
+	cache          *storage.Cache
+	manager        *persistence.SnapshotManager
+	clusterRing    *cluster.HashRing
+	localNodeID    string
+	routingEnabled bool
 }
 
 // NewServer initializes a new server with persistence and recovery
 func NewServer() (*Server, error) {
 	cache := storage.NewCache()
+	clusterRing, localNodeID, routingEnabled := loadClusterRouting()
 
 	snapshotCfg := persistence.NewSnapshotConfig(".", "snapshot.json")
 
@@ -41,9 +49,34 @@ func NewServer() (*Server, error) {
 	}
 
 	return &Server{
-		cache:   cache,
-		manager: manager,
+		cache:          cache,
+		manager:        manager,
+		clusterRing:    clusterRing,
+		localNodeID:    localNodeID,
+		routingEnabled: routingEnabled,
 	}, nil
+}
+
+func loadClusterRouting() (*cluster.HashRing, string, bool) {
+	// The cluster config is optional, so the server keeps working when it is absent.
+	// Routing only becomes active when the CLUSTER_ROUTING flag is turned on.
+	clusterPath := filepath.Join("cluster", "cluster.json")
+	ring, err := cluster.LoadConfig(clusterPath)
+	if err != nil {
+		log.Printf("cluster config not loaded: %v", err)
+		return nil, "", false
+	}
+
+	localNodeID := os.Getenv("CLUSTER_NODE_ID")
+	if localNodeID == "" {
+		nodes := ring.GetNodes()
+		if len(nodes) > 0 {
+			localNodeID = nodes[0].ID
+		}
+	}
+
+	routingEnabled := strings.EqualFold(os.Getenv("CLUSTER_ROUTING"), "true") || os.Getenv("CLUSTER_ROUTING") == "1"
+	return ring, localNodeID, routingEnabled
 }
 
 func (s *Server) Start(addr string) error {
@@ -99,12 +132,18 @@ func (s *Server) execute(cmd *parser.Command) string {
 		return "PONG"
 
 	case "SET":
+		if redirect := s.clusterRedirect(cmd.Key); redirect != "" {
+			return redirect
+		}
 		if err := s.cache.Set(cmd.Key, cmd.Value, cmd.TTL); err != nil {
 			return "ERR " + err.Error()
-		}	
+		}
 		return "OK"
 
 	case "GET":
+		if redirect := s.clusterRedirect(cmd.Key); redirect != "" {
+			return redirect
+		}
 		value, ok := s.cache.Get(cmd.Key)
 		if !ok {
 			return "NULL"
@@ -112,6 +151,9 @@ func (s *Server) execute(cmd *parser.Command) string {
 		return value
 
 	case "DELETE":
+		if redirect := s.clusterRedirect(cmd.Key); redirect != "" {
+			return redirect
+		}
 		if err := s.cache.Delete(cmd.Key); err != nil {
 			return "ERR " + err.Error()
 		}
@@ -121,6 +163,26 @@ func (s *Server) execute(cmd *parser.Command) string {
 		return "ERROR unknown command"
 	}
 }
+
+func (s *Server) clusterRedirect(key string) string {
+	// Return a redirect only when cluster routing is enabled and this node does not own the key.
+	// In the default single-node path the function stays inert and the cache behaves normally.
+	if s.clusterRing == nil || !s.routingEnabled || key == "" {
+		return ""
+	}
+
+	owner := s.clusterRing.GetNode(key)
+	if owner.ID == "" || owner.ID == s.localNodeID {
+		return ""
+	}
+
+	if owner.Address == "" {
+		return fmt.Sprintf("ERR key is owned by cluster node %s", owner.ID)
+	}
+
+	return fmt.Sprintf("REDIRECT %s %s", owner.ID, owner.Address)
+}
+
 func (s *Server) Shutdown() {
 	if s.manager != nil {
 		_ = s.manager.CreateSnapshotNow()
@@ -134,7 +196,7 @@ func (s *Server) Shutdown() {
 func main() {
 	// Initialize server with persistence recovery
 	server, err := NewServer()
-	
+
 	if err != nil {
 		log.Fatalf("failed to create server: %v", err)
 	}

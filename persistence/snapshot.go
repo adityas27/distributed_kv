@@ -5,13 +5,17 @@ import (
 	"os"
 	"path/filepath"
 	"time"
-
-	"tcp_test/storage"
 )
 
+type SnapshotEntry struct {
+	Key       string    `json:"key"`
+	Value     string    `json:"value"`
+	ExpiresAt time.Time `json:"expires_at"`
+}
+
 type Snapshot struct {
-	CreatedAt time.Time               `json:"created_at"`
-	Entries   []storage.SnapshotEntry `json:"entries"`
+	CreatedAt time.Time       `json:"created_at"`
+	Entries   []SnapshotEntry `json:"entries"`
 }
 
 type SnapshotConfig struct {
@@ -36,7 +40,11 @@ func NewSnapshotWriter(config SnapshotConfig) *SnapshotWriter {
 	}
 }
 
-func (s *SnapshotWriter) CreateSnapshot(cache *storage.Cache) error {
+type SnapshotSource interface {
+	SnapshotEntries() []SnapshotEntry
+}
+
+func (s *SnapshotWriter) CreateSnapshot(cache SnapshotSource) error {
 	snapshot := Snapshot{
 		CreatedAt: time.Now(),
 		Entries:   cache.SnapshotEntries(),
