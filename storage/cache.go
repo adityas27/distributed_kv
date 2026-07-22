@@ -2,6 +2,7 @@ package storage
 
 import (
 	"container/list"
+	"fmt"
 	"sync"
 	"time"
 
@@ -10,6 +11,8 @@ import (
 
 const MemoryLimit = 1024 * 1024 * 512
 const KeysLimit = 100
+const MaxKeySize = 4096
+const MaxValueSize = 1024 * 1024
 
 type Entry struct {
 	Value     string
@@ -67,13 +70,19 @@ func NewCache() *Cache {
 }
 
 func (c *Cache) Set(key, value string, ttl int) error {
-	if err := c.wal.SetWAL(key, value, int64(ttl)); err != nil {
-		return err
+	if len(key) > MaxKeySize {
+		return fmt.Errorf("key too large")
+	}
+
+	if len(value) > MaxValueSize {
+		return fmt.Errorf("value too large")
 	}
 
 	c.mu.Lock()
 	defer c.mu.Unlock()
-
+	if err := c.wal.SetWAL(key, value, int64(ttl)); err != nil {
+		return err
+	}
 	if existing, ok := c.items[key]; ok {
 		c.currentMemory -= existing.Size
 		c.lru.Remove(existing.node)

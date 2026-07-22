@@ -2,6 +2,7 @@ package storage
 
 import (
 	"fmt"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -243,5 +244,23 @@ func TestCurrentMemory(t *testing.T) {
 
 	if cache.currentMemory == 0 {
 		t.Fatal("memory accounting failed")
+	}
+}
+
+func TestSetRejectsOversizeKey(t *testing.T) {
+	cache := NewCache()
+
+	key := strings.Repeat("k", MaxKeySize+1)
+	if err := cache.Set(key, "v", 0); err == nil {
+		t.Fatal("expected oversized key to be rejected")
+	}
+}
+
+func TestSetRejectsOversizeValue(t *testing.T) {
+	cache := NewCache()
+
+	value := strings.Repeat("v", MaxValueSize+1)
+	if err := cache.Set("k", value, 0); err == nil {
+		t.Fatal("expected oversized value to be rejected")
 	}
 }

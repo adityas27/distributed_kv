@@ -7,10 +7,11 @@ import (
 )
 
 type Command struct {
-	Name  string
-	Key   string
-	Value string
-	TTL   int
+	Name        string
+	Key         string
+	Value       string
+	ValueLength int
+	TTL         int
 }
 
 func Parse(line string) (*Command, error) {
@@ -48,13 +49,22 @@ func Parse(line string) (*Command, error) {
 	case "SET":
 
 		if len(fields) < 3 {
-			return nil, fmt.Errorf("usage: SET <key> <value> [EX seconds]")
+			return nil, fmt.Errorf("usage: SET <key> <value-length> [EX seconds]")
+		}
+
+		valueLength, err := strconv.Atoi(fields[2])
+		if err != nil || valueLength < 0 {
+			return nil, fmt.Errorf("invalid value length")
 		}
 
 		cmd := &Command{
-			Name:  "SET",
-			Key:   fields[1],
-			Value: fields[2],
+			Name:        "SET",
+			Key:         fields[1],
+			ValueLength: valueLength,
+		}
+
+		if len(fields) != 3 && len(fields) != 5 {
+			return nil, fmt.Errorf("usage: SET <key> <value-length> [EX seconds]")
 		}
 
 		if len(fields) == 5 {

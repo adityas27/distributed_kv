@@ -2,7 +2,9 @@ package persistence
 
 import (
 	"encoding/json"
+	"fmt"
 	"os"
+	"path/filepath"
 	"sync"
 	"time"
 )
@@ -23,6 +25,7 @@ type WALEntry struct {
 }
 
 type WAL struct {
+	path string
 	file *os.File
 	mu   sync.Mutex
 }
@@ -39,7 +42,11 @@ func NewWAL(path string) (*WAL, error) {
 		return nil, err
 	}
 
-	return &WAL{file: f}, nil
+	return &WAL{path: path, file: f}, nil
+}
+
+func (w *WAL) Path() string {
+	return w.path
 }
 
 // SetWAL records a write operation in the log before the cache mutates memory.
@@ -102,4 +109,64 @@ func (w *WAL) Close() error {
 	defer w.mu.Unlock()
 
 	return w.file.Close()
+}
+
+func (w *WAL) Rotate() (string, error) {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+
+	if err := w.file.Close(); err != nil {
+		return "", err
+	}
+
+	archivePath := archivedWALPath(w.path)
+	if err := os.Rename(w.path, archivePath); err != nil {
+		if reopened, openErr := os.OpenFile(w.path, os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0644); openErr == nil {
+			w.file = reopened
+		}
+
+		return "", err
+	}
+
+	_ = cleanupOldArchives(w.path, archivePath)
+
+	return archivePath, nil
+}
+
+func archivedWALPath(activePath string) string {
+	dir := filepath.Dir(activePath)
+	base := filepath.Base(activePath)
+	name := fmt.Sprintf("%s-%d.log", base[:len(base)-len(filepath.Ext(base))], time.Now().UnixNano())
+	return filepath.Join(dir, name)
+}
+
+func cleanupOldArchives(activePath, keepPath string) error {
+	dir := filepath.Dir(activePath)
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		return err
+	}
+
+	for _, entry := range entries {
+		if entry.IsDir() {
+			continue
+		}
+
+		path := filepath.Join(dir, entry.Name())
+		if path == activePath || path == keepPath {
+			continue
+		}
+
+		if filepath.Ext(entry.Name()) != ".log" {
+			continue
+		}
+
+		if len(entry.Name()) < 6 || entry.Name()[:4] != "wal-" {
+			continue
+		}
+
+		_ = os.Remove(path)
+	}
+
+	return nil
 }

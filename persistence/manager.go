@@ -73,11 +73,11 @@ func (sm *SnapshotManager) Start() error {
 					continue
 				}
 
-				if err := sm.walInstance.Close(); err != nil {
+				if _, err := sm.walInstance.Rotate(); err != nil {
 					continue
 				}
 
-				newWAL, err := NewWAL("wal.log")
+				newWAL, err := NewWAL(sm.walInstance.Path())
 				if err != nil {
 					continue
 				}
@@ -107,11 +107,11 @@ func (sm *SnapshotManager) CreateSnapshotNow() error {
 		return err
 	}
 
-	if err := sm.walInstance.Close(); err != nil {
+	if _, err := sm.walInstance.Rotate(); err != nil {
 		return err
 	}
 
-	newWAL, err := NewWAL("wal.log")
+	newWAL, err := NewWAL(sm.walInstance.Path())
 	if err != nil {
 		return err
 	}

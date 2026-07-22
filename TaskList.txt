@@ -1,4 +1,4 @@
-Phase 1 — Core KV Store
+Phase 1 — Core KV Store done
 In-Memory Key-Value Store
 SET
 GET
@@ -16,20 +16,20 @@ GET key
 DELETE key
 PING
 
-Phase 2 — Cache Features
+Phase 2 — Cache Features done
 TTL Support
 Key expiration
 Background cleanup worker
 LRU Eviction
 Memory limit
 Automatic eviction
-Statistics
-Total keys
-Cache hits
-Cache misses
-Evictions
+Statistics // TODO
+Total keys // TODO
+Cache hits // TODO
+Cache misses // TODO
+Evictions // TODO
 
-Phase 3 — Persistence
+Phase 3 — Persistence done
 Write Ahead Log (WAL)
 Log all writes
 Recovery From WAL
@@ -38,7 +38,7 @@ Snapshots
 Periodic persistence
 Faster startup
 
-Phase 4 — Distributed Foundations
+Phase 4 — Distributed Foundations // DONE ✅
 Consistent Hash Ring
 Hash nodes
 Hash keys
@@ -48,16 +48,27 @@ Better load balancing
 Cluster Configuration
 Register nodes
 Maintain node list
+Request Forwarding // NEW ✅
+Transparent request forwarding
+Connection pooling
+Retry logic
+Inter-Node Communication // NEW ✅
+Node-to-node TCP client
+Connection management
+Auto-forwarding to correct node
 
-Phase 5 — Distributed Operations
-Request Routing
+Phase 5 — Distributed Operations // MOSTLY DONE ✅
+Request Routing // DONE in Phase 4
 Forward requests to correct node
-Multi-Node Cluster
+Multi-Node Cluster // DONE in Phase 4
 Run multiple cache servers
-Inter-Node Communication
+Inter-Node Communication // DONE in Phase 4
 Node-to-node TCP communication
+Advanced Features // TODO (Optional)
+Request pipelining
+Optimistic routing
 
-Phase 6 — Reliability
+Phase 6 — Reliability // TODO
 Replication
 Primary replica assignment
 Replica Synchronization
