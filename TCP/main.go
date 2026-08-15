@@ -11,6 +11,7 @@ import (
 	"path/filepath"
 	"strings"
 	"tcp_test/cluster"
+	"tcp_test/observability"
 	"tcp_test/parser"
 	"tcp_test/persistence"
 	"tcp_test/storage"
@@ -37,6 +38,8 @@ type Server struct {
 	heartbeatMonitor  *cluster.HeartbeatMonitor
 	failoverManager   *cluster.FailoverManager
 	rebalanceManager  *cluster.RebalanceManager
+	metrics           *observability.Metrics
+	logger            *observability.Logger
 }
 
 // NewServer initializes a new server with persistence and recovery
@@ -67,6 +70,29 @@ func NewServer() (*Server, error) {
 
 	clientPool := cluster.NewClientPool()
 
+	// Initialize observability
+	metrics := observability.NewMetrics()
+	
+	logLevel := observability.INFO
+	if os.Getenv("LOG_LEVEL") == "DEBUG" {
+		logLevel = observability.DEBUG
+	}
+	
+	jsonLogs := os.Getenv("LOG_FORMAT") == "json"
+	logger := observability.NewLogger(localNodeID, logLevel, jsonLogs)
+	
+	// Enable file logging if configured
+	if logFile := os.Getenv("LOG_FILE"); logFile != "" {
+		if err := logger.EnableFileLogging(logFile); err != nil {
+			log.Printf("Failed to enable file logging: %v", err)
+		}
+	}
+
+	logger.Info("Cache server starting", map[string]interface{}{
+		"node_id":         localNodeID,
+		"routing_enabled": routingEnabled,
+	})
+
 	// Initialize Phase 6 features if clustering is enabled
 	var replicaManager *cluster.ReplicaManager
 	var heartbeatMonitor *cluster.HeartbeatMonitor
@@ -91,7 +117,7 @@ func NewServer() (*Server, error) {
 
 		// Register ring change callback for rebalancing
 		failoverManager.OnRingChange(func() {
-			log.Println("Ring topology changed, triggering rebalance")
+			logger.Info("Ring topology changed, triggering rebalance", nil)
 			keys := cache.GetAllKeys()
 			rebalanceManager.TriggerRebalance(keys)
 		})
@@ -122,7 +148,26 @@ func NewServer() (*Server, error) {
 		})
 
 		log.Println("Reliability features enabled: replication, heartbeat, failover, rebalancing")
+		logger.Info("Reliability features enabled", map[string]interface{}{
+			"replication_factor": 2,
+			"heartbeat_interval": "5s",
+			"failure_threshold":  3,
+		})
 	}
+
+	// Start metrics HTTP server if configured
+	metricsAddr := os.Getenv("METRICS_ADDR")
+	if metricsAddr == "" {
+		metricsAddr = ":8080" // Default metrics port
+	}
+	
+	metricsHandler := observability.NewMetricsHandler(metrics, cache.Stats, localNodeID)
+	go func() {
+		logger.Infof("Starting metrics server on %s", metricsAddr)
+		if err := observability.StartMetricsServer(metricsAddr, metricsHandler); err != nil {
+			logger.Error("Metrics server failed", map[string]interface{}{"error": err.Error()})
+		}
+	}()
 
 	return &Server{
 		cache:             cache,
@@ -136,6 +181,8 @@ func NewServer() (*Server, error) {
 		heartbeatMonitor:  heartbeatMonitor,
 		failoverManager:   failoverManager,
 		rebalanceManager:  rebalanceManager,
+		metrics:           metrics,
+		logger:            logger,
 	}, nil
 }
 
@@ -183,16 +230,25 @@ func (s *Server) Start(addr string) error {
 	}
 	defer ln.Close()
 
+	s.logger.Info("TCP server listening", map[string]interface{}{
+		"address": addr,
+	})
 	fmt.Println("Listening on", addr)
 
 	for {
 		conn, err := ln.Accept()
 		if err != nil {
+			s.logger.Error("Accept error", map[string]interface{}{
+				"error": err.Error(),
+			})
 			fmt.Println("accept error:", err)
 			continue
 		}
 
 		if !s.acquireConnection() {
+			s.logger.Warn("Connection limit reached, rejecting client", map[string]interface{}{
+				"remote_addr": conn.RemoteAddr().String(),
+			})
 			_ = conn.Close()
 			continue
 		}
@@ -205,7 +261,11 @@ func (s *Server) handleConnection(conn net.Conn) {
 	defer conn.Close()
 	defer s.releaseConnection()
 
-	fmt.Println("Client connected:", conn.RemoteAddr())
+	clientAddr := conn.RemoteAddr().String()
+	s.logger.Debug("Client connected", map[string]interface{}{
+		"remote_addr": clientAddr,
+	})
+	fmt.Println("Client connected:", clientAddr)
 
 	reader := bufio.NewReader(conn)
 
@@ -360,28 +420,38 @@ func (s *Server) releaseConnection() {
 }
 
 func (s *Server) execute(cmd *parser.Command) string {
+	startTime := time.Now()
+	var result string
+	var cmdType string
+
 	switch cmd.Name {
 
 	case "PING":
-		return "PONG"
+		result = "PONG"
+		cmdType = "PING"
 
 	case "REPLICA":
 		// Handle replica write (don't replicate again to avoid loops)
 		// Extract actual command after REPLICA prefix
-		return s.handleReplicaWrite(cmd)
+		result = s.handleReplicaWrite(cmd)
+		cmdType = "REPLICA"
 
 	case "SET":
+		cmdType = "SET"
 		// Check if we should handle this key (primary or replica)
 		if s.replicaManager != nil && !s.replicaManager.ShouldHandle(cmd.Key) {
 			// Forward to the correct node
 			if response, forwarded := s.forwardIfNeeded(cmd); forwarded {
-				return response
+				result = response
+				break
 			}
 		}
 
 		// Handle the write locally
 		if err := s.cache.Set(cmd.Key, cmd.Value, cmd.TTL); err != nil {
-			return "ERR " + err.Error()
+			result = "ERR " + err.Error()
+			s.metrics.RecordError()
+			break
 		}
 
 		// Replicate to replica nodes if we're the primary
@@ -394,63 +464,86 @@ func (s *Server) execute(cmd *parser.Command) string {
 			}
 			
 			if err := s.replicaManager.ReplicateWrite(cmdLine, cmd.Key, []byte(cmd.Value)); err != nil {
-				log.Printf("replication warning: %v", err)
+				s.logger.Warn("Replication failed", map[string]interface{}{
+					"key":   cmd.Key,
+					"error": err.Error(),
+				})
 				// Don't fail the write if replication fails
 			}
 		}
 
-		return "OK"
+		result = "OK"
 
 	case "GET":
+		cmdType = "GET"
 		// For GET operations, we can read from any replica (primary or secondary)
 		if s.replicaManager != nil && !s.replicaManager.ShouldHandle(cmd.Key) {
 			// Forward to primary (could optimize to read from nearest replica)
 			if response, forwarded := s.forwardIfNeeded(cmd); forwarded {
-				return response
+				result = response
+				break
 			}
 		}
 
 		value, ok := s.cache.Get(cmd.Key)
 		if !ok {
-			return "NULL"
+			result = "NULL"
+		} else {
+			result = value
 		}
-		return value
 
 	case "DELETE":
+		cmdType = "DELETE"
 		// Check if we should handle this key (primary or replica)
 		if s.replicaManager != nil && !s.replicaManager.ShouldHandle(cmd.Key) {
 			// Forward to the correct node
 			if response, forwarded := s.forwardIfNeeded(cmd); forwarded {
-				return response
+				result = response
+				break
 			}
 		}
 
 		// Handle the delete locally
 		if err := s.cache.Delete(cmd.Key); err != nil {
-			return "ERR " + err.Error()
+			result = "ERR " + err.Error()
+			s.metrics.RecordError()
+			break
 		}
 
 		// Replicate to replica nodes if we're the primary
 		if s.replicaManager != nil && s.replicaManager.IsPrimary(cmd.Key) {
 			cmdLine := fmt.Sprintf("DELETE %s", cmd.Key)
 			if err := s.replicaManager.ReplicateWrite(cmdLine, cmd.Key, nil); err != nil {
-				log.Printf("replication warning: %v", err)
+				s.logger.Warn("Delete replication failed", map[string]interface{}{
+					"key":   cmd.Key,
+					"error": err.Error(),
+				})
 			}
 		}
 
-		return "OK"
+		result = "OK"
 
 	case "STATUS":
+		cmdType = "STATUS"
 		// Return cluster status
-		return s.getClusterStatus()
+		result = s.getClusterStatus()
 
 	case "STATS":
+		cmdType = "STATS"
 		// Return cache statistics
-		return s.getCacheStats()
+		result = s.getCacheStats()
 
 	default:
-		return "ERROR unknown command"
+		cmdType = "UNKNOWN"
+		result = "ERROR unknown command"
+		s.metrics.RecordError()
 	}
+
+	// Record metrics
+	latency := time.Since(startTime)
+	s.metrics.RecordRequest(cmdType, latency)
+
+	return result
 }
 
 // forwardIfNeeded checks if the key should be handled by another node
