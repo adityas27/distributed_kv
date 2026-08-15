@@ -21,13 +21,21 @@ type Entry struct {
 	node      *list.Element
 }
 
+type CacheStats struct {
+	Hits      int64
+	Misses    int64
+	Evictions int64
+	Sets      int64
+	Deletes   int64
+}
+
 type Cache struct {
 	mu            sync.RWMutex
 	items         map[string]*Entry
 	lru           *list.List
 	currentMemory int
-
-	wal *persistence.WAL
+	stats         CacheStats
+	wal           *persistence.WAL
 }
 
 func (c *Cache) WAL() *persistence.WAL {
@@ -80,6 +88,9 @@ func (c *Cache) Set(key, value string, ttl int) error {
 
 	c.mu.Lock()
 	defer c.mu.Unlock()
+	
+	c.stats.Sets++
+	
 	if err := c.wal.SetWAL(key, value, int64(ttl)); err != nil {
 		return err
 	}
@@ -113,6 +124,9 @@ func (c *Cache) Get(key string) (string, bool) {
 	c.mu.RUnlock()
 
 	if !ok {
+		c.mu.Lock()
+		c.stats.Misses++
+		c.mu.Unlock()
 		return "", false
 	}
 
@@ -123,6 +137,7 @@ func (c *Cache) Get(key string) (string, bool) {
 		c.currentMemory -= entry.Size
 		c.lru.Remove(entry.node)
 		delete(c.items, key)
+		c.stats.Misses++
 		c.mu.Unlock()
 		return "", false
 	}
@@ -130,6 +145,7 @@ func (c *Cache) Get(key string) (string, bool) {
 	//update LRU order on access
 	c.mu.Lock()
 	c.lru.MoveToFront(entry.node)
+	c.stats.Hits++
 	c.mu.Unlock()
 
 	return entry.Value, true
@@ -142,6 +158,8 @@ func (c *Cache) Delete(key string) error {
 
 	c.mu.Lock()
 	defer c.mu.Unlock()
+	
+	c.stats.Deletes++
 
 	if entry, ok := c.items[key]; ok {
 		c.currentMemory -= entry.Size
@@ -161,6 +179,7 @@ func (c *Cache) evictIfNeeded() {
 				c.currentMemory -= entry.Size
 				c.lru.Remove(elem)
 				delete(c.items, key)
+				c.stats.Evictions++
 			} else {
 				break
 			}
@@ -212,11 +231,23 @@ func (c *Cache) Stats() map[string]interface{} {
 	c.mu.RLock()
 	defer c.mu.RUnlock()
 
+	totalRequests := c.stats.Hits + c.stats.Misses
+	hitRate := 0.0
+	if totalRequests > 0 {
+		hitRate = float64(c.stats.Hits) / float64(totalRequests) * 100.0
+	}
+
 	return map[string]interface{}{
 		"items":        len(c.items),
 		"memory_used":  c.currentMemory,
 		"memory_limit": MemoryLimit,
 		"keys_limit":   KeysLimit,
+		"hits":         c.stats.Hits,
+		"misses":       c.stats.Misses,
+		"hit_rate":     hitRate,
+		"evictions":    c.stats.Evictions,
+		"sets":         c.stats.Sets,
+		"deletes":      c.stats.Deletes,
 	}
 }
 
@@ -268,4 +299,16 @@ func (c *Cache) SetWAL(newWAL *persistence.WAL) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	c.wal = newWAL
+}
+
+// GetAllKeys returns all keys currently in the cache
+func (c *Cache) GetAllKeys() []string {
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+
+	keys := make([]string, 0, len(c.items))
+	for key := range c.items {
+		keys = append(keys, key)
+	}
+	return keys
 }

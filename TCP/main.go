@@ -26,13 +26,17 @@ const (
 )
 
 type Server struct {
-	cache          *storage.Cache
-	manager        *persistence.SnapshotManager
-	clusterRing    *cluster.HashRing
-	localNodeID    string
-	routingEnabled bool
-	connSlots      chan struct{}
-	clientPool     *cluster.ClientPool
+	cache             *storage.Cache
+	manager           *persistence.SnapshotManager
+	clusterRing       *cluster.HashRing
+	localNodeID       string
+	routingEnabled    bool
+	connSlots         chan struct{}
+	clientPool        *cluster.ClientPool
+	replicaManager    *cluster.ReplicaManager
+	heartbeatMonitor  *cluster.HeartbeatMonitor
+	failoverManager   *cluster.FailoverManager
+	rebalanceManager  *cluster.RebalanceManager
 }
 
 // NewServer initializes a new server with persistence and recovery
@@ -61,14 +65,77 @@ func NewServer() (*Server, error) {
 		return nil, err
 	}
 
+	clientPool := cluster.NewClientPool()
+
+	// Initialize Phase 6 features if clustering is enabled
+	var replicaManager *cluster.ReplicaManager
+	var heartbeatMonitor *cluster.HeartbeatMonitor
+	var failoverManager *cluster.FailoverManager
+	var rebalanceManager *cluster.RebalanceManager
+
+	if routingEnabled && clusterRing != nil && localNodeID != "" {
+		// Setup replication (2 replicas by default)
+		replicaManager = cluster.NewReplicaManager(clusterRing, clientPool, localNodeID, 2)
+
+		// Setup heartbeat monitoring
+		heartbeatMonitor = cluster.NewHeartbeatMonitor(clusterRing, clientPool, localNodeID)
+
+		// Setup failover management
+		failoverManager = cluster.NewFailoverManager(clusterRing, heartbeatMonitor, clientPool, localNodeID)
+
+		// Setup rebalancing
+		rebalanceManager = cluster.NewRebalanceManager(clusterRing, localNodeID, replicaManager)
+
+		// Start heartbeat monitoring
+		heartbeatMonitor.Start()
+
+		// Register ring change callback for rebalancing
+		failoverManager.OnRingChange(func() {
+			log.Println("Ring topology changed, triggering rebalance")
+			keys := cache.GetAllKeys()
+			rebalanceManager.TriggerRebalance(keys)
+		})
+
+		// Setup key migration callback
+		rebalanceManager.OnKeyMigrate(func(key string, targetNode cluster.Node) error {
+			// Get the value from cache
+			value, ok := cache.Get(key)
+			if !ok {
+				return nil // Key already gone
+			}
+
+			// Forward to target node
+			client, err := clientPool.GetClient(targetNode.Address)
+			if err != nil {
+				return err
+			}
+
+			cmdLine := fmt.Sprintf("SET %s %d", key, len(value))
+			_, err = client.Forward(cmdLine, []byte(value))
+			if err != nil {
+				return err
+			}
+
+			// Delete locally after successful migration
+			_ = cache.Delete(key)
+			return nil
+		})
+
+		log.Println("Reliability features enabled: replication, heartbeat, failover, rebalancing")
+	}
+
 	return &Server{
-		cache:          cache,
-		manager:        manager,
-		clusterRing:    clusterRing,
-		localNodeID:    localNodeID,
-		routingEnabled: routingEnabled,
-		connSlots:      make(chan struct{}, maxConcurrentClients),
-		clientPool:     cluster.NewClientPool(),
+		cache:             cache,
+		manager:           manager,
+		clusterRing:       clusterRing,
+		localNodeID:       localNodeID,
+		routingEnabled:    routingEnabled,
+		connSlots:         make(chan struct{}, maxConcurrentClients),
+		clientPool:        clientPool,
+		replicaManager:    replicaManager,
+		heartbeatMonitor:  heartbeatMonitor,
+		failoverManager:   failoverManager,
+		rebalanceManager:  rebalanceManager,
 	}, nil
 }
 
@@ -298,21 +365,51 @@ func (s *Server) execute(cmd *parser.Command) string {
 	case "PING":
 		return "PONG"
 
+	case "REPLICA":
+		// Handle replica write (don't replicate again to avoid loops)
+		// Extract actual command after REPLICA prefix
+		return s.handleReplicaWrite(cmd)
+
 	case "SET":
-		// Check if we need to forward to another node
-		if response, forwarded := s.forwardIfNeeded(cmd); forwarded {
-			return response
+		// Check if we should handle this key (primary or replica)
+		if s.replicaManager != nil && !s.replicaManager.ShouldHandle(cmd.Key) {
+			// Forward to the correct node
+			if response, forwarded := s.forwardIfNeeded(cmd); forwarded {
+				return response
+			}
 		}
+
+		// Handle the write locally
 		if err := s.cache.Set(cmd.Key, cmd.Value, cmd.TTL); err != nil {
 			return "ERR " + err.Error()
 		}
+
+		// Replicate to replica nodes if we're the primary
+		if s.replicaManager != nil && s.replicaManager.IsPrimary(cmd.Key) {
+			var cmdLine string
+			if cmd.TTL > 0 {
+				cmdLine = fmt.Sprintf("SET %s %d EX %d", cmd.Key, len(cmd.Value), cmd.TTL)
+			} else {
+				cmdLine = fmt.Sprintf("SET %s %d", cmd.Key, len(cmd.Value))
+			}
+			
+			if err := s.replicaManager.ReplicateWrite(cmdLine, cmd.Key, []byte(cmd.Value)); err != nil {
+				log.Printf("replication warning: %v", err)
+				// Don't fail the write if replication fails
+			}
+		}
+
 		return "OK"
 
 	case "GET":
-		// Check if we need to forward to another node
-		if response, forwarded := s.forwardIfNeeded(cmd); forwarded {
-			return response
+		// For GET operations, we can read from any replica (primary or secondary)
+		if s.replicaManager != nil && !s.replicaManager.ShouldHandle(cmd.Key) {
+			// Forward to primary (could optimize to read from nearest replica)
+			if response, forwarded := s.forwardIfNeeded(cmd); forwarded {
+				return response
+			}
 		}
+
 		value, ok := s.cache.Get(cmd.Key)
 		if !ok {
 			return "NULL"
@@ -320,14 +417,36 @@ func (s *Server) execute(cmd *parser.Command) string {
 		return value
 
 	case "DELETE":
-		// Check if we need to forward to another node
-		if response, forwarded := s.forwardIfNeeded(cmd); forwarded {
-			return response
+		// Check if we should handle this key (primary or replica)
+		if s.replicaManager != nil && !s.replicaManager.ShouldHandle(cmd.Key) {
+			// Forward to the correct node
+			if response, forwarded := s.forwardIfNeeded(cmd); forwarded {
+				return response
+			}
 		}
+
+		// Handle the delete locally
 		if err := s.cache.Delete(cmd.Key); err != nil {
 			return "ERR " + err.Error()
 		}
+
+		// Replicate to replica nodes if we're the primary
+		if s.replicaManager != nil && s.replicaManager.IsPrimary(cmd.Key) {
+			cmdLine := fmt.Sprintf("DELETE %s", cmd.Key)
+			if err := s.replicaManager.ReplicateWrite(cmdLine, cmd.Key, nil); err != nil {
+				log.Printf("replication warning: %v", err)
+			}
+		}
+
 		return "OK"
+
+	case "STATUS":
+		// Return cluster status
+		return s.getClusterStatus()
+
+	case "STATS":
+		// Return cache statistics
+		return s.getCacheStats()
 
 	default:
 		return "ERROR unknown command"
@@ -425,6 +544,10 @@ func (s *Server) forwardRequest(cmd *parser.Command, address string) (string, er
 }
 
 func (s *Server) Shutdown() {
+	if s.heartbeatMonitor != nil {
+		s.heartbeatMonitor.Stop()
+	}
+
 	if s.clientPool != nil {
 		s.clientPool.CloseAll()
 	}
@@ -438,6 +561,108 @@ func (s *Server) Shutdown() {
 		_ = s.cache.WAL().Close()
 	}
 }
+
+// handleReplicaWrite processes a write that came from a primary node
+func (s *Server) handleReplicaWrite(cmd *parser.Command) string {
+	// REPLICA command format: REPLICA SET key len [EX ttl]
+	// We need to extract the actual command and execute it without replication
+	
+	// For now, just return OK since the command parser already extracted the data
+	// In a real system, you'd parse the replica command properly
+	
+	switch {
+	case strings.Contains(cmd.Key, "SET"):
+		// Extract key from the replica command
+		parts := strings.Fields(cmd.Key)
+		if len(parts) < 3 {
+			return "ERR invalid replica command"
+		}
+		
+		actualKey := parts[1]
+		
+		// Find TTL if present
+		var ttl int
+		for i, part := range parts {
+			if part == "EX" && i+1 < len(parts) {
+				fmt.Sscanf(parts[i+1], "%d", &ttl)
+				break
+			}
+		}
+		
+		if err := s.cache.Set(actualKey, cmd.Value, ttl); err != nil {
+			return "ERR " + err.Error()
+		}
+		return "OK"
+		
+	case strings.Contains(cmd.Key, "DELETE"):
+		parts := strings.Fields(cmd.Key)
+		if len(parts) < 2 {
+			return "ERR invalid replica command"
+		}
+		
+		actualKey := parts[1]
+		if err := s.cache.Delete(actualKey); err != nil {
+			return "ERR " + err.Error()
+		}
+		return "OK"
+		
+	default:
+		return "ERR unknown replica command"
+	}
+}
+
+// getClusterStatus returns cluster health and status information
+func (s *Server) getClusterStatus() string {
+	if !s.routingEnabled || s.clusterRing == nil {
+		return "SINGLE_NODE"
+	}
+
+	nodes := s.clusterRing.GetNodes()
+	status := fmt.Sprintf("NODES:%d", len(nodes))
+
+	if s.heartbeatMonitor != nil {
+		allHealth := s.heartbeatMonitor.GetAllHealth()
+		aliveCount := 0
+		for _, health := range allHealth {
+			if health.IsAlive {
+				aliveCount++
+			}
+		}
+		status += fmt.Sprintf(" ALIVE:%d", aliveCount+1) // +1 for self
+	}
+
+	if s.failoverManager != nil {
+		failed := s.failoverManager.GetFailedNodes()
+		status += fmt.Sprintf(" FAILED:%d", len(failed))
+	}
+
+	if s.rebalanceManager != nil {
+		pending := s.rebalanceManager.GetPendingCount()
+		if pending > 0 {
+			status += fmt.Sprintf(" REBALANCING:%d", pending)
+		}
+	}
+
+	return status
+}
+
+// getCacheStats returns cache statistics
+func (s *Server) getCacheStats() string {
+	stats := s.cache.Stats()
+	
+	return fmt.Sprintf("KEYS:%v MEM:%v/%v HITS:%v MISSES:%v RATE:%.1f%% EVICT:%v SETS:%v DEL:%v",
+		stats["items"],
+		stats["memory_used"],
+		stats["memory_limit"],
+		stats["hits"],
+		stats["misses"],
+		stats["hit_rate"],
+		stats["evictions"],
+		stats["sets"],
+		stats["deletes"],
+	)
+}
+
 func main() {
 	// Initialize server with persistence recovery
 	server, err := NewServer()

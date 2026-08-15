@@ -1,7 +1,0 @@
-{"op":"SET","key":"KEY","value":"VALueS123\u001b[D\u001b[D\u001b[D\u001b[D\u001b[D\u001b[D\u001b[D\u001b[D\u001b[D\u001b[D\u001b[D\u001b[D","ts":1782250076}
-{"op":"SET","key":"KEY!","value":"\b\b1","ts":1782250192}
-{"op":"SET","key":"KEY1","value":"ADITYA","ts":1782250203}
-{"op":"DELETE","key":"KEY1","ts":1782250213}
-{"op":"SET","key":"KEY1","value":"Aditya","ts":1782250246}
-{"op":"SET","key":"KEY12","value":"ADITYA","ttl":5,"ts":1782251598}
-{"op":"SET","key":"KEY12","value":"ADITYA","ttl":2,"ts":1782251633}

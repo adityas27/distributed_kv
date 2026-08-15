@@ -9,7 +9,7 @@ type HashRing struct {
 	virtualNodes int
 	ring         map[uint32]Node
 	sortedHashes []uint32
-	nodes         map[string]Node
+	nodes        map[string]Node
 }
 
 func NewHashRing(virtualNodes int) *HashRing {
@@ -83,4 +83,14 @@ func (h *HashRing) GetNodes() []Node {
 	}
 
 	return nodes
+}
+
+// GetSortedHashes returns the sorted hash positions in the ring
+func (h *HashRing) GetSortedHashes() []uint32 {
+	return h.sortedHashes
+}
+
+// GetNodeAtHash returns the node at a specific hash position
+func (h *HashRing) GetNodeAtHash(hash uint32) Node {
+	return h.ring[hash]
 }
